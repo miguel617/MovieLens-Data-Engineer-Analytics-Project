@@ -1,0 +1,256 @@
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+MovieLens_load
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+
+-- Firstly, we have imported all csv files to cloudera VM at /user/cloudera/ml25M
+-- Secondly, we have copied every single file into each folder below described with the creation of each table (at the 'location')
+-- Finally, all csv files are loaded at first into an external temporary table and then they are stored to internal Hive tables
+
+----------------------------------------------------------------------
+--Create the database
+DROP DATABASE IF EXISTS ml25M;
+CREATE DATABASE ml25M;
+USE ml25M;
+----------------------------------------------------------------------
+-- Optimization procedures
+-- PARTITIONS
+SET hive.exec.dynamic.partition=true;
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.max.dynamic.partitions.pernode=300;
+SET optimize.sort.dynamic.partitioning=true;
+-- BUCKETING
+SET hive.enforce.bucketing=true;
+SET hive.enforce.sorting=true;
+
+-- VECTORIZATION
+SET hive.vectorized.execution.enabled=true;
+SET hive.vectorized.execution.reduce.enabled=true;
+SET hive.vectorized.input.format.excludes=;
+-- COST-BASED OPTIMIZATION
+SET hive.cbo.enable=true;
+SET hive.compute.query.using.stats=true;
+SET hive.stats.fetch.column.stats=true;
+SET hive.stats.fetch.partition.stats=true;
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+-- Ratings Table
+DROP TABLE IF EXISTS ml25M.aux;
+
+CREATE EXTERNAL TABLE ml25M.aux
+(
+userId INT,
+movieId INT,
+rating FLOAT,
+timestamp BIGINT
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/ml25M/ratings'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+DROP TABLE IF EXISTS ml25M.ratings;
+
+CREATE TABLE ml25M.ratings
+(
+userId INT,
+movieId INT,
+rating FLOAT,
+timestamp TIMESTAMP
+)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 4 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml25M.ratings
+SELECT userId,
+movieId,
+rating,
+from_unixtime(timestamp) as timestamp
+FROM ml25M.aux;
+
+
+----------------------------------------------------------------------
+--Tags table
+DROP TABLE IF EXISTS ml25M.aux;
+
+CREATE EXTERNAL TABLE ml25M.aux (
+userId INT,
+movieId INT,
+tag STRING,
+timestamp STRING
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES ( "separatorChar" = ",", "quoteChar"="\"", "escapeChar"="\\" )
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/ml25M/tags'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+
+DROP TABLE IF EXISTS ml25M.tags;
+
+CREATE TABLE ml25M.tags
+(
+userId INT,
+movieId INT,
+tag STRING,
+timestamp TIMESTAMP
+)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml25M.tags
+SELECT userId,
+movieId,
+tag,
+from_unixtime(CAST(timestamp as BIGINT)) as timestamp
+FROM ml25M.aux;
+
+
+----------------------------------------------------------------------
+-- Links table
+DROP TABLE IF EXISTS ml25M.aux;
+
+CREATE EXTERNAL TABLE ml25M.aux
+(
+movieId INT,
+imdbId INT,
+tmdbId INT
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/ml25M/links'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+
+DROP TABLE IF EXISTS ml25M.links;
+
+CREATE TABLE ml25M.links
+(
+movieId INT,
+imdbId INT,
+tmdbId INT
+)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 4 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml25M.links
+SELECT movieId,
+imdbId,
+tmdbId
+FROM ml25M.aux;
+
+----------------------------------------------------------------------
+-- Movies table with genre exploded
+DROP TABLE IF EXISTS ml25M.aux;
+
+CREATE EXTERNAL TABLE ml25M.aux
+(
+movieId INT,
+title STRING,
+genres STRING
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+"separatorChar" = ",",
+"quoteChar"="\"",
+"escapeChar"="\\"
+)
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/ml25M/movies'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+
+DROP TABLE IF EXISTS ml25M.movies;
+
+CREATE TABLE ml25M.movies
+(
+movieId INT,
+title STRING,
+year INT
+)
+PARTITIONED BY (genre STRING)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml25M.movies
+PARTITION(genre)
+SELECT movieId, title, cast(regexp_extract(title, '\\(([0-9]{4})\\)',1)
+as INT) as year, genre
+FROM ml25M.aux
+lateral view explode(split(genres,'\\|')) genres as genre;
+
+----------------------------------------------------------------------
+-- Create new table genome-tags
+
+DROP TABLE IF EXISTS ml25M.aux;
+
+CREATE EXTERNAL TABLE ml25M.aux 
+(
+tagId INT,
+tag STRING
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/ml25M/genome_tags'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+
+DROP TABLE IF EXISTS ml25M.genome_tags;
+
+CREATE TABLE ml25M.genome_tags
+(
+tagId INT,
+tag STRING
+)
+STORED AS ORC;
+
+
+INSERT OVERWRITE TABLE ml25M.genome_tags 
+SELECT tagId, 
+tag 
+FROM ml25M.aux;
+
+----------------------------------------------------------------------
+-- Create new table genome-scores
+
+DROP TABLE IF EXISTS ml25M.aux;
+
+CREATE EXTERNAL TABLE ml25M.aux 
+(
+movieId INT,
+tagId INT,
+relevance FLOAT
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/ml25M/genome_scores'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+
+DROP TABLE IF EXISTS ml25M.genome_scores;
+
+CREATE TABLE ml25M.genome_scores
+(
+movieId INT,
+tagId INT,
+relevance FLOAT
+)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 4 BUCKETS
+STORED AS ORC;
+
+
+INSERT OVERWRITE TABLE ml25M.genome_scores
+SELECT movieId, 
+tagId,
+relevance
+FROM ml25M.aux;
+
+
+----------------------------------------------------------------------
+
+DROP TABLE IF EXISTS ml25M.aux;

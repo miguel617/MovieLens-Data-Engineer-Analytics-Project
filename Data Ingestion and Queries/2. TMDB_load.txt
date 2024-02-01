@@ -1,0 +1,148 @@
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+TMDB_Load
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+
+--TMDB dataset scrapped from python script 'API_tmdb_scrapping.ipynb' using the tmdb API (details at: https://developers.themoviedb.org/3/movies/get-movie-details).
+--Csv file "tmdb.csv"
+
+--Create the database
+DROP DATABASE IF EXISTS tmdb;
+CREATE DATABASE tmdb;
+USE tmdb;
+
+----------------------------------------------------------------------
+-- Optimization procedures
+-- PARTITIONS
+SET hive.exec.dynamic.partition=true;
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.max.dynamic.partitions.pernode=300;
+SET optimize.sort.dynamic.partitioning=true;
+-- BUCKETING
+SET hive.enforce.bucketing=true;
+SET hive.enforce.sorting=true;
+
+-- VECTORIZATION
+SET hive.vectorized.execution.enabled=true;
+SET hive.vectorized.execution.reduce.enabled=true;
+SET hive.vectorized.input.format.excludes=;
+-- COST-BASED OPTIMIZATION
+SET hive.cbo.enable=true;
+SET hive.compute.query.using.stats=true;
+SET hive.stats.fetch.column.stats=true;
+SET hive.stats.fetch.partition.stats=true;
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+-- tmdb table
+
+DROP TABLE IF EXISTS tmdb.aux;
+
+CREATE EXTERNAL TABLE tmdb.aux
+(
+index INT,
+movieId INT,
+imdbId INT,
+tmdbId INT,
+poster_path STRING,
+release_date DATE,
+runtime INT,
+adult STRING,
+popularity FLOAT,
+budget INT,
+revenue INT,
+production_companies STRING,
+production_countries STRING
+)
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'
+WITH SERDEPROPERTIES (
+"separatorChar" = ",",
+"quoteChar"="\"",
+"escapeChar"="\\"
+)
+STORED AS TEXTFILE
+LOCATION '/user/cloudera/tmdb'
+TBLPROPERTIES ("skip.header.line.count"="1");
+
+
+DROP TABLE IF EXISTS tmdb.tmdb_original;
+
+CREATE TABLE tmdb.tmdb_original
+(
+movieId INT,
+imdbId INT,
+tmdbId INT,
+poster_path STRING,
+release_date DATE,
+runtime INT,
+adult STRING,
+popularity FLOAT,
+budget INT,
+revenue INT,
+production_companies STRING,
+production_countries STRING
+)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+
+INSERT OVERWRITE TABLE tmdb.tmdb_original
+SELECT movieId,
+imdbId, 
+tmdbId, 
+poster_path, 
+release_date, 
+runtime,
+adult, 
+popularity,
+budget, 
+revenue, 
+production_companies, 
+production_countries
+FROM tmdb.aux;
+
+----------------------------------------------------------------------
+-- tmdb table with production_countries exploded
+
+DROP TABLE IF EXISTS tmdb.tmdb_countries_exploded;
+
+CREATE TABLE tmdb.tmdb_countries_exploded
+(
+movieId INT,
+production_country STRING
+)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE tmdb.tmdb_countries_exploded
+SELECT movieId, country
+FROM tmdb.tmdb_original
+lateral view explode(split(production_countries,'\\|')) production_countries as country;
+
+----------------------------------------------------------------------
+-- tmdb table with production_companies exploded
+
+DROP TABLE IF EXISTS tmdb.tmdb_companies_exploded;
+
+CREATE TABLE tmdb.tmdb_companies_exploded
+(
+movieId INT,
+production_company STRING
+)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE tmdb.tmdb_companies_exploded
+SELECT movieId, company
+FROM tmdb.tmdb_original
+lateral view explode(split(production_companies,'\\|')) production_companies as company;
+
+----------------------------------------------------------------------
+-- Drop Aux Table
+
+DROP TABLE IF EXISTS tmdb.aux;
+
+
+
+
+

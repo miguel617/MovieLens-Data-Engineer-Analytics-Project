@@ -1,0 +1,151 @@
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+Queries
+----------------------------------------------------------------------
+----------------------------------------------------------------------
+
+-- The objective here is to group as many useful information as possible by creating factual and dimension tables which are going to be the basis for our Power BI model schema.
+-- Both data from ml25M and TMDB were used to query into these tables.
+
+----------------------------------------------------------------------
+-- Optimization procedures
+-- PARTITIONS
+SET hive.exec.dynamic.partition=true;
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.max.dynamic.partitions.pernode=300;
+SET optimize.sort.dynamic.partitioning=true;
+-- BUCKETING
+SET hive.enforce.bucketing=true;
+SET hive.enforce.sorting=true;
+
+-- VECTORIZATION
+SET hive.vectorized.execution.enabled=true;
+SET hive.vectorized.execution.reduce.enabled=true;
+SET hive.vectorized.input.format.excludes=;
+-- COST-BASED OPTIMIZATION
+SET hive.cbo.enable=true;
+SET hive.compute.query.using.stats=true;
+SET hive.stats.fetch.column.stats=true;
+SET hive.stats.fetch.partition.stats=true;
+----------------------------------------------------------------------
+
+-- DIM tags
+DROP TABLE IF EXISTS ml25m.dim_tags;
+
+CREATE TABLE ml25m.dim_tags
+STORED AS ORC AS
+SELECT 		
+tagid,
+tag
+FROM ml25m.genome_tags;
+
+----------------------------------------------------------------------
+-- FACT tags
+DROP TABLE IF EXISTS ml25m.fact_tags;
+
+CREATE TABLE ml25m.fact_tags
+(
+movieId INT,
+tagID INT,
+user_count INT,
+tag_relevance FLOAT
+)
+CLUSTERED BY (movieId) SORTED BY (movieId ASC) INTO 1 BUCKETS
+STORED AS ORC;
+
+INSERT OVERWRITE TABLE ml25m.fact_tags
+SELECT 
+t.movieId,
+gt.tagId,
+COUNT(DISTINCT t.userId) AS count_users,
+gs.relevance
+FROM ml25m.tags AS t
+JOIN ml25m.genome_tags AS gt ON gt.tag = t.tag
+JOIN ml25m.genome_scores AS gs ON gt.tagId = gs.tagId AND t.movieId = gs.movieId
+GROUP BY t.movieId, gt.tagId, gs.relevance;
+
+----------------------------------------------------------------------
+-- DIM Date (starting from 01-01-1874: first movie on the movielens dataset and ending in 31-12-2021: most recent movie from TMDB)
+
+DROP TABLE IF EXISTS dim_date;
+
+CREATE TABLE dim_date AS 
+WITH dates AS (
+SELECT date_add("1874-01-01", a.pos) AS d
+FROM (SELECT posexplode(split(repeat("o", datediff("2021-12-31", "1874-01-01")), "o"))) a)
+SELECT
+d AS movie_date,
+YEAR(d) as year,
+(INT((MONTH(d)-1)/3)+1) as quarter,
+MONTH(d) as month,
+WEEKOFYEAR(d) as week,
+DATE_FORMAT(d, 'EEEE') AS dayname_of_week,
+DAY(d) as day
+FROM dates
+SORT BY movie_date;
+
+----------------------------------------------------------------------
+-- DIM Movies (with titles without including year in its name)
+
+DROP TABLE IF EXISTS dim_movies;
+
+CREATE TABLE dim_movies
+STORED AS ORC AS
+SELECT MIN(mv.movieId) as movieId,
+MIN(regexp_extract(mv.title, '(^.*)\\(([0-9]{4})\\)',1)) AS title, 
+MIN(t.poster_path) as poster_url
+FROM ml25m.movies AS mv JOIN tmdb.tmdb_original AS t ON (mv.movieId = t.movieId)
+GROUP BY mv.movieId;
+
+----------------------------------------------------------------------
+-- FACT Movies
+
+DROP TABLE IF EXISTS fact_movies;
+
+CREATE TABLE fact_movies
+STORED AS ORC AS
+SELECT mv.movieId,
+MIN(t.release_date) as movie_date,
+MIN(t.runtime) as runtime, 
+MIN(t.popularity) as popularity,
+MIN(t.budget) as budget,
+MIN(t.revenue) as revenue,
+MIN(t.revenue - t.budget) as profit,
+AVG(rt.rating) as avg_rating,
+COUNT(rt.rating) as count_rating,
+MIN(mv.count_genre) as count_genre,
+MIN(pc.count_produc_countries) as count_produc_countries,
+MIN(pcc.count_produc_companies) as count_produc_companies
+FROM (SELECT movieId, COUNT(movieId) As count_genre FROM ml25m.movies GROUP BY movieId) AS mv 
+JOIN tmdb.tmdb_original AS t ON mv.movieId = t.movieId
+JOIN ml25M.ratings AS rt ON t.movieId = rt.movieId
+JOIN (SELECT movieId, COUNT(movieId) As count_produc_countries FROM tmdb.tmdb_countries_exploded GROUP BY movieId) AS pc ON rt.movieId = pc.movieId
+JOIN (SELECT movieId, COUNT(movieId) As count_produc_companies FROM tmdb.tmdb_companies_exploded GROUP BY movieId) AS pcc ON rt.movieId = pcc.movieId
+GROUP BY mv.movieId
+
+----------------------------------------------------------------------
+--DIM Genre
+ 
+DROP TABLE IF EXISTS ml25m.dim_genre;
+
+CREATE TABLE ml25m.dim_genre
+STORED AS ORC AS 
+SELECT mv.movieid AS movieid, mv.genre AS genre
+FROM ml25m.movies AS mv;
+
+----------------------------------------------------------------------
+--DIM Genre GROUPBY
+ 
+DROP TABLE IF EXISTS ml25m.dim_genre_groups;
+
+CREATE TABLE ml25m.dim_genre_groups
+STORED AS ORC AS 
+SELECT mv.genre AS genre, COUNT(mv.genre) AS genre_count
+FROM ml25m.movies AS mv
+GROUP BY mv.genre;
+
+
+----------------------------------------------------------------------
+-- Drop Aux Table
+ 
+DROP TABLE IF EXISTS tmdb.aux;
