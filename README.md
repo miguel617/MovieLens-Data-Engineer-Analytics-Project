@@ -9,4 +9,4 @@ The objectives with this project are:
 - Analyse and draw several conclusions about the Cinema Industry Environment
 
 
-**  **
+**All the HiveQL queries can be seen in the "Data Ingestion and Queries" folder and the final PowerBI dashboard for visualization in the "PowerBI Dashboard" folder.**
